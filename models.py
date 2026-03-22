@@ -77,6 +77,13 @@ def apply_pool(x: torch.Tensor, pooling: str) -> torch.Tensor:
     raise ValueError(f"Unknown pooling mode: {pooling}")
 
 
+def build_stage_layers(input_channels: int, output_channels: int, convs_per_stage: int) -> nn.ModuleList:
+    layers = [nn.Conv2d(input_channels, output_channels, kernel_size=3, padding=1)]
+    for _ in range(convs_per_stage - 1):
+        layers.append(nn.Conv2d(output_channels, output_channels, kernel_size=3, padding=1))
+    return nn.ModuleList(layers)
+
+
 class StandardCNN(nn.Module):
     def __init__(
         self,
@@ -86,12 +93,13 @@ class StandardCNN(nn.Module):
         input_channels: int = 1,
         pooling: str = "max",
         use_residual: bool = False,
+        convs_per_stage: int = 1,
     ) -> None:
         super().__init__()
         self.pooling = pooling
         self.use_residual = use_residual
-        self.conv1 = nn.Conv2d(input_channels, channels[0], kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(channels[0], channels[1], kernel_size=3, padding=1)
+        self.stage1 = build_stage_layers(input_channels, channels[0], convs_per_stage)
+        self.stage2 = build_stage_layers(channels[0], channels[1], convs_per_stage)
         self.shortcut1 = nn.Conv2d(input_channels, channels[0], kernel_size=1)
         self.shortcut2 = nn.Conv2d(channels[0], channels[1], kernel_size=1)
         pooled_size = pooled_spatial_size(image_size, pooling)
@@ -101,13 +109,15 @@ class StandardCNN(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = apply_pool(self.shortcut1(x), self.pooling)
-        x = F.relu(self.conv1(x))
+        for layer in self.stage1:
+            x = F.relu(layer(x))
         x = apply_pool(x, self.pooling)
         if self.use_residual:
             x = x + residual
 
         residual = apply_pool(self.shortcut2(x), self.pooling)
-        x = F.relu(self.conv2(x))
+        for layer in self.stage2:
+            x = F.relu(layer(x))
         x = apply_pool(x, self.pooling)
         if self.use_residual:
             x = x + residual
@@ -126,12 +136,13 @@ class FrozenGateCNN(nn.Module):
         input_channels: int = 1,
         pooling: str = "max",
         use_residual: bool = False,
+        convs_per_stage: int = 1,
     ) -> None:
         super().__init__()
         self.pooling = pooling
         self.use_residual = use_residual
-        self.conv1 = nn.Conv2d(input_channels, channels[0], kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(channels[0], channels[1], kernel_size=3, padding=1)
+        self.stage1 = build_stage_layers(input_channels, channels[0], convs_per_stage)
+        self.stage2 = build_stage_layers(channels[0], channels[1], convs_per_stage)
         self.shortcut1 = nn.Conv2d(input_channels, channels[0], kernel_size=1)
         self.shortcut2 = nn.Conv2d(channels[0], channels[1], kernel_size=1)
         pooled_size = pooled_spatial_size(image_size, pooling)
@@ -139,45 +150,56 @@ class FrozenGateCNN(nn.Module):
         self.fc1 = nn.Linear(channels[1] * pooled_size * pooled_size, 64)
         self.fc2 = nn.Linear(64, num_classes)
 
-        self.initial_conv1 = copy.deepcopy(self.conv1)
-        self.initial_conv2 = copy.deepcopy(self.conv2)
+        self.initial_stage1 = copy.deepcopy(self.stage1)
+        self.initial_stage2 = copy.deepcopy(self.stage2)
         self.initial_fc1 = copy.deepcopy(self.fc1)
-        for layer in [self.initial_conv1, self.initial_conv2, self.initial_fc1]:
-            for parameter in layer.parameters():
-                parameter.requires_grad_(False)
+        for layer_group in [self.initial_stage1, self.initial_stage2, [self.initial_fc1]]:
+            for layer in layer_group:
+                for parameter in layer.parameters():
+                    parameter.requires_grad_(False)
+
+    def _forward_frozen_stage(
+        self,
+        current: torch.Tensor,
+        reference: torch.Tensor,
+        current_layers: nn.ModuleList,
+        reference_layers: nn.ModuleList,
+        shortcut: nn.Module,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        residual = apply_pool(shortcut(current), self.pooling)
+        for current_layer, reference_layer in zip(current_layers, reference_layers):
+            current = current_layer(current)
+            with torch.no_grad():
+                reference = reference_layer(reference)
+                relu_gate = (reference > 0).to(current.dtype)
+            current = current * relu_gate
+            reference = reference * relu_gate
+
+        if self.pooling == "max":
+            current = frozen_max_pool2d(current, reference, kernel_size=2, stride=2)
+            reference = F.max_pool2d(reference, kernel_size=2, stride=2)
+        else:
+            current = apply_pool(current, self.pooling)
+            reference = apply_pool(reference, self.pooling)
+        if self.use_residual:
+            current = current + residual
+        return current, reference
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        residual = apply_pool(self.shortcut1(x), self.pooling)
-        current = self.conv1(x)
-        with torch.no_grad():
-            reference = self.initial_conv1(x)
-            relu_gate = (reference > 0).to(current.dtype)
-        current = current * relu_gate
-        reference = reference * relu_gate
-        if self.pooling == "max":
-            current = frozen_max_pool2d(current, reference, kernel_size=2, stride=2)
-            reference = F.max_pool2d(reference, kernel_size=2, stride=2)
-        else:
-            current = apply_pool(current, self.pooling)
-            reference = apply_pool(reference, self.pooling)
-        if self.use_residual:
-            current = current + residual
-
-        residual = apply_pool(self.shortcut2(current), self.pooling)
-        current = self.conv2(current)
-        with torch.no_grad():
-            reference = self.initial_conv2(reference)
-            relu_gate = (reference > 0).to(current.dtype)
-        current = current * relu_gate
-        reference = reference * relu_gate
-        if self.pooling == "max":
-            current = frozen_max_pool2d(current, reference, kernel_size=2, stride=2)
-            reference = F.max_pool2d(reference, kernel_size=2, stride=2)
-        else:
-            current = apply_pool(current, self.pooling)
-            reference = apply_pool(reference, self.pooling)
-        if self.use_residual:
-            current = current + residual
+        current, reference = self._forward_frozen_stage(
+            x,
+            x,
+            self.stage1,
+            self.initial_stage1,
+            self.shortcut1,
+        )
+        current, reference = self._forward_frozen_stage(
+            current,
+            reference,
+            self.stage2,
+            self.initial_stage2,
+            self.shortcut2,
+        )
 
         current = self.flatten(current)
         reference = self.flatten(reference)

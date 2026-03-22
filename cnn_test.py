@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-test", type=int, default=0, help="0 means use the full test split.")
     parser.add_argument("--noise", type=float, default=0.28, help="Gaussian pixel noise. Also applies to MNIST/CIFAR-10.")
     parser.add_argument("--channels", type=int, nargs=2, default=[12, 24])
+    parser.add_argument("--convs-per-stage", type=int, default=1, help="Number of conv+ReLU layers in each CNN stage.")
     parser.add_argument("--pooling", choices=["none", "avg", "max"], default="max")
     parser.add_argument("--residual", action="store_true", help="Enable residual shortcuts around the two conv blocks.")
     parser.add_argument("--epochs", type=int, default=80)
@@ -55,7 +56,7 @@ def run_experiment(args: argparse.Namespace) -> None:
         enabled=args.wandb,
         project=args.wandb_project,
         entity=args.wandb_entity,
-        group=args.wandb_group,
+        group=args.wandb_name_prefix,
         name_prefix=args.wandb_name_prefix,
     )
 
@@ -79,6 +80,7 @@ def run_experiment(args: argparse.Namespace) -> None:
             input_channels=input_channels,
             pooling=args.pooling,
             use_residual=args.residual,
+            convs_per_stage=args.convs_per_stage,
         )
         standard_run = init_wandb_run(
             options=wandb_options,
@@ -92,6 +94,7 @@ def run_experiment(args: argparse.Namespace) -> None:
                 "n_test": args.n_test,
                 "noise": args.noise,
                 "channels": channels,
+                "convs_per_stage": args.convs_per_stage,
                 "pooling": args.pooling,
                 "residual": args.residual,
                 "image_size": image_size,
@@ -129,6 +132,7 @@ def run_experiment(args: argparse.Namespace) -> None:
             input_channels=input_channels,
             pooling=args.pooling,
             use_residual=args.residual,
+            convs_per_stage=args.convs_per_stage,
         )
         frozen_run = init_wandb_run(
             options=wandb_options,
@@ -142,6 +146,7 @@ def run_experiment(args: argparse.Namespace) -> None:
                 "n_test": args.n_test,
                 "noise": args.noise,
                 "channels": channels,
+                "convs_per_stage": args.convs_per_stage,
                 "pooling": args.pooling,
                 "residual": args.residual,
                 "image_size": image_size,
@@ -181,6 +186,7 @@ def run_experiment(args: argparse.Namespace) -> None:
             "n_test": args.n_test,
             "noise": args.noise,
             "channels": channels,
+            "convs_per_stage": args.convs_per_stage,
             "pooling": args.pooling,
             "residual": args.residual,
             "image_size": image_size,
@@ -203,7 +209,7 @@ def run_experiment(args: argparse.Namespace) -> None:
             "Frozen-gate CNN: ReLU masks and 2x2 max-pool winner indices are both chosen "
             "from the initialization-time activations, while the trainable convolutions and classifier update normally.\n"
             f"Channels: {channels}, image size: {image_size}, input channels: {input_channels}, "
-            f"classes: {num_classes}, pooling: {args.pooling}, residual: {args.residual}"
+            f"classes: {num_classes}, convs/stage: {args.convs_per_stage}, pooling: {args.pooling}, residual: {args.residual}"
         ),
         epochs=args.epochs,
         learning_rate=args.lr,

@@ -1,7 +1,7 @@
 import math
 
 import torch
-from torch.utils.data import Subset, TensorDataset
+from torch.utils.data import Dataset, Subset, TensorDataset
 from torchvision import datasets, transforms
 
 
@@ -266,6 +266,20 @@ def make_torchvision_image_dataset(
         transform=_build_torchvision_transform(noise, seed + 10_000),
     )
     return _sample_subset(train_set, n_train, seed), _sample_subset(test_set, n_test, seed + 20_000)
+
+
+class BinaryTargetDataset(Dataset):
+    def __init__(self, base_dataset, positive_class: int) -> None:
+        self.base_dataset = base_dataset
+        self.positive_class = positive_class
+
+    def __len__(self) -> int:
+        return len(self.base_dataset)
+
+    def __getitem__(self, index: int):
+        features, label = self.base_dataset[index]
+        binary_label = torch.tensor(float(label == self.positive_class), dtype=torch.float32)
+        return features, binary_label
 
 
 def get_image_dataset_config(name: str) -> dict[str, int]:
